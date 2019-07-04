@@ -1,463 +1,544 @@
-       CBL CICS(SP)
-       IDENTIFICATION DIVISION.
-       PROGRAM-ID. ZECS003.
-       AUTHOR.     Randy Frerking and Rich Jackson.
-      *****************************************************************
-      *                                                               *
-      * z/OS Enterprise Caching Services.                             *
-      *                                                               *
-      * This program is executed when an HTTP/DELETE request has      *
-      * received a ?clear=*.  All records with a timestamp greater    *
-      * than current ABS will be deleted.                             *
-      *                                                               *
-      * This program will send a response before performing both the  *
-      * delete and replicate rquests when .ADR is present in the URL  *
-      * (Asynchronous Delete Request).                                *
-      *                                                               *
-      * This program will send a response after  performing both the  *
-      * delete and replicate rquests when .SDR is present in the URL  *
-      * (Synchronous  Delete Request).                                *
-      *                                                               *
-      * Date       UserID    Description                              *
-      * ---------- --------  ---------------------------------------- *
-      *                                                               *
-      *****************************************************************
-       ENVIRONMENT DIVISION.
-       DATA DIVISION.
-       WORKING-STORAGE SECTION.
-
-      *****************************************************************
-      * DEFINE LOCAL VARIABLES                                        *
-      *****************************************************************
-       01  CURRENT-ABS            PIC S9(15) VALUE ZEROES COMP-3.
-       01  TWELVE                 PIC S9(08) VALUE     12 COMP.
-       01  TEN                    PIC S9(08) VALUE     10 COMP.
-       01  SEVEN                  PIC S9(08) VALUE      7 COMP.
-       01  TWO                    PIC S9(08) VALUE      2 COMP.
-       01  ONE                    PIC S9(08) VALUE      1 COMP.
-       01  FIVE-TWELVE            PIC S9(08) VALUE    512 COMP.
-
-       01  EOF                    PIC  X(01) VALUE SPACES.
-       01  SLASH                  PIC  X(01) VALUE '/'.
-
-       01  ADR                    PIC  X(03) VALUE 'ADR'.
-       01  SDR                    PIC  X(03) VALUE 'SDR'.
-
-       01  DOT                    PIC  X(01) VALUE '.'.
-       01  CLEAR-ALL              PIC  X(07) VALUE 'clear=*'.
-
-       01  CRLF                   PIC  X(02) VALUE X'0D25'.
-
-       01  ZECS-DC.
-           02  DC-TRANID          PIC  X(04) VALUE 'ZC##'.
-           02  FILLER             PIC  X(02) VALUE 'DC'.
-           02  FILLER             PIC  X(42) VALUE SPACES.
-
-       01  ZK-FCT.
-           02  ZK-TRANID          PIC  X(04) VALUE 'ZC##'.
-           02  FILLER             PIC  X(04) VALUE 'KEY '.
-
-       01  ZF-FCT.
-           02  ZF-TRANID          PIC  X(04) VALUE 'ZC##'.
-           02  FILLER             PIC  X(04) VALUE 'FILE'.
-
-       01  ZK-LENGTH              PIC S9(04) COMP VALUE ZEROES.
-       01  ZF-LENGTH              PIC S9(04) COMP VALUE ZEROES.
-       01  DELETE-LENGTH          PIC S9(04) COMP VALUE 8.
-
-      *****************************************************************
-      * zECS KEY  record definition.                                  *
-      *****************************************************************
-       COPY ZECSZKC.
-
-       01  FC-READ                PIC  X(06) VALUE 'READ  '.
-       01  FC-DELETE              PIC  X(06) VALUE 'DELETE'.
-       01  CSSL                   PIC  X(04) VALUE '@tdq@'.
-       01  TD-LENGTH              PIC S9(04) COMP VALUE ZEROES.
-
-       01  TD-RECORD.
-           02  TD-DATE            PIC  X(10).
-           02  FILLER             PIC  X(01) VALUE SPACES.
-           02  TD-TIME            PIC  X(08).
-           02  FILLER             PIC  X(01) VALUE SPACES.
-           02  TD-TRANID          PIC  X(04).
-           02  FILLER             PIC  X(01) VALUE SPACES.
-           02  TD-MESSAGE         PIC  X(90) VALUE SPACES.
-
-       01  FILE-ERROR.
-           02  FILLER             PIC  X(12) VALUE 'FILE  I/O - '.
-           02  FILLER             PIC  X(07) VALUE 'EIBFN: '.
-           02  FE-FN              PIC  X(06) VALUE SPACES.
-           02  FILLER             PIC  X(10) VALUE ' EIBRESP: '.
-           02  FE-RESP            PIC  9(04) VALUE ZEROES.
-           02  FILLER             PIC  X(11) VALUE ' EIBRESP2: '.
-           02  FE-RESP2           PIC  9(04) VALUE ZEROES.
-           02  FILLER             PIC  X(12) VALUE ' Paragraph: '.
-           02  FE-PARAGRAPH       PIC  X(04) VALUE SPACES.
-           02  FILLER             PIC  X(20) VALUE SPACES.
-
-       01  KEY-ERROR.
-           02  FILLER             PIC  X(12) VALUE 'KEY   I/O - '.
-           02  FILLER             PIC  X(07) VALUE 'EIBFN: '.
-           02  KE-FN              PIC  X(06) VALUE SPACES.
-           02  FILLER             PIC  X(10) VALUE ' EIBRESP: '.
-           02  KE-RESP            PIC  9(04) VALUE ZEROES.
-           02  FILLER             PIC  X(11) VALUE ' EIBRESP2: '.
-           02  KE-RESP2           PIC  9(04) VALUE ZEROES.
-           02  FILLER             PIC  X(12) VALUE ' Paragraph: '.
-           02  KE-PARAGRAPH       PIC  X(04) VALUE SPACES.
-           02  FILLER             PIC  X(20) VALUE SPACES.
-
-      *****************************************************************
-      * Replicate resources.                                          *
-      *****************************************************************
-
-       01  URI-MAP                PIC  X(08) VALUE SPACES.
-       01  URI-PATH               PIC X(255) VALUE SPACES.
-
-       01  RESOURCES              PIC  X(10) VALUE '/resources'.
-       01  REPLICATE              PIC  X(10) VALUE '/replicate'.
-       01  HTTP-OK                PIC  X(02) VALUE 'OK'.
-
-       01  HTTP-STATUS-200        PIC S9(04) COMP VALUE 200.
-
-       01  SEND-ACTION            PIC S9(08) COMP VALUE ZEROES.
-       01  NUMBER-OF-SPACES       PIC S9(08) COMP VALUE ZEROES.
-       01  NUMBER-OF-NULLS        PIC S9(08) COMP VALUE ZEROES.
-       01  WEB-METHOD             PIC S9(08) COMP VALUE ZEROES.
-       01  WEB-PATH-LENGTH        PIC S9(08) COMP VALUE 256.
-
-       01  ACTIVE-SINGLE          PIC  X(02) VALUE 'A1'.
-       01  ACTIVE-ACTIVE          PIC  X(02) VALUE 'AA'.
-       01  ACTIVE-STANDBY         PIC  X(02) VALUE 'AS'.
-
-       01  DC-CONTROL.
-           02  FILLER             PIC  X(06).
-           02  DC-TYPE            PIC  X(02) VALUE SPACES.
-           02  DC-CRLF            PIC  X(02).
-           02  THE-OTHER-DC       PIC X(160) VALUE SPACES.
-           02  FILLER             PIC  X(02).
-       01  DC-TOKEN               PIC  X(16) VALUE SPACES.
-       01  DC-LENGTH              PIC S9(08) COMP  VALUE ZEROES.
-       01  THE-OTHER-DC-LENGTH    PIC S9(08) COMP  VALUE 160.
-
-       01  SESSION-TOKEN          PIC  9(18) COMP VALUE ZEROES.
-
-       01  URL-SCHEME-NAME        PIC  X(16) VALUE SPACES.
-       01  URL-SCHEME             PIC S9(08) COMP VALUE ZEROES.
-       01  URL-PORT               PIC S9(08) COMP VALUE ZEROES.
-       01  URL-HOST-NAME          PIC  X(80) VALUE SPACES.
-       01  URL-HOST-NAME-LENGTH   PIC S9(08) COMP VALUE 80.
-       01  WEB-STATUS-CODE        PIC S9(04) COMP VALUE 00.
-       01  WEB-STATUS-LENGTH      PIC S9(08) COMP VALUE 15.
-       01  WEB-STATUS-ABSTIME     PIC  9(15) VALUE ZEROES.
-
-       01  WEB-PATH               PIC X(512) VALUE SPACES.
-
-       01  CONVERSE-LENGTH        PIC S9(08) COMP VALUE 40.
-       01  CONVERSE-RESPONSE      PIC  X(40) VALUE SPACES.
-
-       01  TEXT-PLAIN             PIC  X(56) VALUE 'text/plain'.
-
-      *****************************************************************
-      * zECS FILE record definition.                                  *
-      *****************************************************************
-       COPY ZECSZFC.
-
-       LINKAGE SECTION.
-       01  DFHCOMMAREA.
-           02  CA-TYPE            PIC  X(03).
-           02  CA-URI-FIELD-01    PIC  X(10).
-
-       PROCEDURE DIVISION.
-
-      *****************************************************************
-      * Main process.                                                 *
-      *****************************************************************
-           PERFORM 1000-INITIALIZE         THRU 1000-EXIT.
-           PERFORM 2000-REPLICATE          THRU 2000-EXIT.
-           PERFORM 3000-READ-ZF            THRU 3000-EXIT
-                   WITH TEST AFTER
-                   UNTIL EOF EQUAL 'Y'.
-           PERFORM 4000-CLEAR-COMPLETE     THRU 4000-EXIT.
-           PERFORM 9000-RETURN             THRU 9000-EXIT.
-
-      *****************************************************************
-      * Initialize resources for ?clear=* (all)   request.            *
-      * When .ADR is present in the URL, send the response before     *
-      * performing the delete and replication request                 *
-      * (Asynchronous Delete Request).                                *
-      *****************************************************************
-       1000-INITIALIZE.
-           MOVE EIBTRNID(3:2)     TO ZK-TRANID(3:2)
-                                     ZF-TRANID(3:2)
-                                     DC-TRANID(3:2).
-
-           EXEC CICS ASKTIME ABSTIME(CURRENT-ABS) NOHANDLE
-           END-EXEC.
-
-           IF  CA-TYPE         EQUAL ADR
-           OR  CA-URI-FIELD-01 EQUAL REPLICATE
-               PERFORM 8000-SEND-RESPONSE     THRU 8000-EXIT.
-
-       1000-EXIT.
-           EXIT.
-
-      *****************************************************************
-      * Replicate request to the other Data Center.                   *
-      * If this is a replicate request, set document type to null,    *
-      * as this is the other Data Center.                             *
-      *                                                               *
-      * If we don't contact the other Data Center successfully,       *
-      * zECS   expiration process will eventually delete the old      *
-      * records.                                                      *
-      *****************************************************************
-       2000-REPLICATE.
-           PERFORM 7000-GET-URL               THRU 7000-EXIT.
-
-           IF  CA-URI-FIELD-01 EQUAL REPLICATE
-               MOVE LOW-VALUES TO    DC-TYPE.
-
-           IF  EIBRESP EQUAL DFHRESP(NORMAL)
-           IF  DC-TYPE EQUAL ACTIVE-ACTIVE
-           OR  DC-TYPE EQUAL ACTIVE-STANDBY
-               PERFORM 7100-WEB-OPEN          THRU 7100-EXIT.
-
-           IF  EIBRESP EQUAL DFHRESP(NORMAL)
-           IF  DC-TYPE EQUAL ACTIVE-ACTIVE
-           OR  DC-TYPE EQUAL ACTIVE-STANDBY
-               MOVE DFHVALUE(DELETE)            TO WEB-METHOD
-               PERFORM 7200-WEB-CONVERSE      THRU 7200-EXIT.
-
-           IF  EIBRESP EQUAL DFHRESP(NORMAL)
-           IF  DC-TYPE EQUAL ACTIVE-ACTIVE
-           OR  DC-TYPE EQUAL ACTIVE-STANDBY
-               PERFORM 7300-WEB-CLOSE         THRU 7300-EXIT.
-
-       2000-EXIT.
-           EXIT.
-
-      *****************************************************************
-      * Read zECS cache record.                                       *
-      * Since there can be multiple segments for a single cache       *
-      * record, only check the first record and make decisions        *
-      * accordingly.                                                  *
-      *****************************************************************
-       3000-READ-ZF.
-           MOVE LENGTH OF ZF-RECORD       TO ZF-LENGTH.
-
-           EXEC CICS READ FILE(ZF-FCT)
-                RIDFLD(ZF-KEY-16)
-                INTO  (ZF-RECORD)
-                LENGTH(ZF-LENGTH)
-                GTEQ
-                NOHANDLE
-           END-EXEC.
-
-           IF  EIBRESP NOT EQUAL DFHRESP(NORMAL)
-               MOVE 'Y'       TO EOF
-           ELSE
-               IF  ZF-ABS LESS   THAN CURRENT-ABS
-                   PERFORM 3100-DELETE      THRU 3100-EXIT.
-
-           ADD ONE            TO ZF-ZEROES.
-
-       3000-EXIT.
-           EXIT.
-
-      *****************************************************************
-      * Delete the local cache record.                                *
-      *****************************************************************
-       3100-DELETE.
-           EXEC CICS DELETE FILE(ZF-FCT)
-                RIDFLD(ZF-KEY-16)
-                KEYLENGTH(DELETE-LENGTH)
-                GENERIC
-                NOHANDLE
-           END-EXEC.
-
-           EXEC CICS DELETE FILE(ZK-FCT)
-                RIDFLD(ZF-ZK-KEY)
-                NOHANDLE
-           END-EXEC.
-
-       3100-EXIT.
-           EXIT.
-
-      *****************************************************************
-      * When .SDR is present in the URL, send the response after      *
-      * performing the delete and replication request                 *
-      * (Synchronous  Delete Request).                                *
-      *****************************************************************
-       4000-CLEAR-COMPLETE.
-           IF  CA-URI-FIELD-01 EQUAL RESOURCES
-           AND CA-TYPE         EQUAL SDR
-               PERFORM 8000-SEND-RESPONSE     THRU 8000-EXIT.
-
-       4000-EXIT.
-           EXIT.
-
-      *****************************************************************
-      * Get URL for replication process.                              *
-      * URL must be in the following format:                          *
-      * http://hostname:port                                          *
-      *****************************************************************
-       7000-GET-URL.
-
-           EXEC CICS DOCUMENT CREATE DOCTOKEN(DC-TOKEN)
-                TEMPLATE(ZECS-DC)
-                NOHANDLE
-           END-EXEC.
-
-           MOVE LENGTH OF DC-CONTROL TO DC-LENGTH.
-
-           IF  EIBRESP EQUAL DFHRESP(NORMAL)
-               EXEC CICS DOCUMENT RETRIEVE DOCTOKEN(DC-TOKEN)
-                    INTO     (DC-CONTROL)
-                    LENGTH   (DC-LENGTH)
-                    MAXLENGTH(DC-LENGTH)
-                    DATAONLY
-                    NOHANDLE
-               END-EXEC.
-
-           IF  EIBRESP EQUAL DFHRESP(NORMAL)
-           AND DC-LENGTH GREATER THAN TEN
-               SUBTRACT TWELVE FROM DC-LENGTH
-                             GIVING THE-OTHER-DC-LENGTH
-
-               EXEC CICS WEB PARSE
-                    URL(THE-OTHER-DC)
-                    URLLENGTH(THE-OTHER-DC-LENGTH)
-                    SCHEMENAME(URL-SCHEME-NAME)
-                    HOST(URL-HOST-NAME)
-                    HOSTLENGTH(URL-HOST-NAME-LENGTH)
-                    PORTNUMBER(URL-PORT)
-                    NOHANDLE
-               END-EXEC.
-
-           IF  EIBRESP NOT EQUAL DFHRESP(NORMAL)
-           OR  DC-LENGTH LESS THAN TEN
-           OR  DC-LENGTH EQUAL            TEN
-               MOVE ACTIVE-SINGLE                 TO DC-TYPE.
-
-       7000-EXIT.
-           EXIT.
-
-      *****************************************************************
-      * Open WEB connection with the other Data Center zECS.          *
-      *****************************************************************
-       7100-WEB-OPEN.
-           IF  URL-SCHEME-NAME EQUAL 'HTTPS'
-               MOVE DFHVALUE(HTTPS)  TO URL-SCHEME
-           ELSE
-               MOVE DFHVALUE(HTTP)   TO URL-SCHEME.
-
-           EXEC CICS WEB OPEN
-                HOST(URL-HOST-NAME)
-                HOSTLENGTH(URL-HOST-NAME-LENGTH)
-                PORTNUMBER(URL-PORT)
-                SCHEME(URL-SCHEME)
-                SESSTOKEN(SESSION-TOKEN)
-                NOHANDLE
-           END-EXEC.
-
-       7100-EXIT.
-           EXIT.
-
-      *****************************************************************
-      * Converse with the other Data Center zECS.                     *
-      * The first element of the path, which for normal processing is *
-      * /resources, must be changed to /replicate.                    *
-      *****************************************************************
-       7200-WEB-CONVERSE.
-           MOVE FIVE-TWELVE      TO WEB-PATH-LENGTH.
-           MOVE ZEROES           TO NUMBER-OF-NULLS.
-           MOVE EIBTRNID         TO URI-MAP.
-           MOVE 'R'              TO URI-MAP(5:1).
-
-           EXEC CICS INQUIRE URIMAP(URI-MAP)
-                PATH(URI-PATH)
-                NOHANDLE
-           END-EXEC.
-
-           STRING URI-PATH
-                  DOT
-                  ADR
-                  SLASH
-                  DELIMITED BY '*'
-                  INTO WEB-PATH.
-
-           INSPECT WEB-PATH TALLYING NUMBER-OF-NULLS
-                   FOR ALL LOW-VALUES.
-           SUBTRACT NUMBER-OF-NULLS  FROM WEB-PATH-LENGTH.
-
-           INSPECT WEB-PATH TALLYING NUMBER-OF-SPACES
-                   FOR ALL SPACES.
-           SUBTRACT NUMBER-OF-SPACES FROM WEB-PATH-LENGTH.
-
-           MOVE REPLICATE TO WEB-PATH(1:10).
-
-           EXEC CICS WEB CONVERSE
-                SESSTOKEN(SESSION-TOKEN)
-                PATH(WEB-PATH)
-                PATHLENGTH(WEB-PATH-LENGTH)
-                METHOD(WEB-METHOD)
-                MEDIATYPE(ZF-MEDIA)
-                INTO(CONVERSE-RESPONSE)
-                TOLENGTH(CONVERSE-LENGTH)
-                MAXLENGTH(CONVERSE-LENGTH)
-                STATUSCODE(WEB-STATUS-CODE)
-                STATUSLEN (WEB-STATUS-LENGTH)
-                STATUSTEXT(WEB-STATUS-ABSTIME)
-                QUERYSTRING(CLEAR-ALL)
-                QUERYSTRLEN(SEVEN)
-                NOOUTCONVERT
-                NOHANDLE
-           END-EXEC.
-
-       7200-EXIT.
-           EXIT.
-
-      *****************************************************************
-      * Close WEB connection with the other Data Center zECS.         *
-      *****************************************************************
-       7300-WEB-CLOSE.
-
-           EXEC CICS WEB CLOSE
-                SESSTOKEN(SESSION-TOKEN)
-                NOHANDLE
-           END-EXEC.
-
-       7300-EXIT.
-           EXIT.
-
-      *****************************************************************
-      * Send response to client                                       *
-      *****************************************************************
-       8000-SEND-RESPONSE.
-           MOVE DFHVALUE(IMMEDIATE)    TO SEND-ACTION.
-
-           EXEC CICS WEB SEND
-                FROM       (CRLF)
-                FROMLENGTH (TWO)
-                MEDIATYPE  (TEXT-PLAIN)
-                ACTION     (SEND-ACTION)
-                STATUSCODE (HTTP-STATUS-200)
-                STATUSTEXT (HTTP-OK)
-                SRVCONVERT
-                NOHANDLE
-           END-EXEC.
-
-       8000-EXIT.
-           EXIT.
-
-      *****************************************************************
-      * Return to CICS                                                *
-      *****************************************************************
-       9000-RETURN.
-
-           EXEC CICS RETURN
-           END-EXEC.
-
-       9000-EXIT.
-           EXIT.
+       identification division.
+       program-id. cow.
+
+       environment division.
+
+       data division.
+
+       working-storage section.
+
+
+       01 newline         pic x   value x'0a'.
+
+       01 analyzed-query pic x(1600).  
+
+       01 the-great-dispatch.
+
+          03  routing-table            occurs 10 times.
+
+            05   routing-pattern   pic x(999).
+            05   routing-destiny   pic x(999).
+
+                                                                               
+       01 tester         pic x(1) value "n".  
+       01 anyfound       pic x(1) value "n".
+       01 ctr            pic 99 usage comp-5.
+
+       01 the-values.
+
+          05 query-values           occurs 10 times.
+            10 query-value-name     pic x(90).
+            10 query-value          pic x(90).
+
+
+
+       procedure division.
+
+
+       copy "config.cbl".
+
+
+       perform web-header.
+
+       call 'getquery' using analyzed-query.
+
+
+       perform varying ctr from 1 by 1
+             until ctr > 5
+
+           call 'checkquery' using analyzed-query routing-pattern(ctr) tester the-values
+
+           if (tester="y")
+
+              *> display routing-pattern(ctr) "<hr>" 
+              move "y" to anyfound
+              call routing-destiny(ctr) using the-values
+
+           end-if
+
+
+       end-perform
+
+
+       if (anyfound="n") perform bad-query-error.
+
+       *> if (anyfound="y")  call 'showvars' using the-values.  
+
+        
+
+       goback.
+
+
+
+ bad-query-error.
+
+ display "<b>Cobol-on-Wheelchair error:</b> query pattern not found (<i>" function trim(analyzed-query) "</i>)".
+
+
+ web-header.
+
+       display
+           "content-type: text/html"
+           newline
+       end-display.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+       identification division.
+       program-id. getquery.
+
+       environment division.
+
+              input-output section.
+       file-control.
+           select webinput assign to keyboard.
+
+
+       data division.
+       file section.
+       fd webinput.
+          01 postchunk       pic x(1024).
+
+       working-storage section.
+
+       78 name-count      value 34.
+       01 name-index      pic 99 usage comp-5.
+       01 value-string    pic x(256).
+       01 environment-names.
+          02 name-strings.
+             03 filler    pic x(20) value 'AUTH_TYPE'.
+             03 filler    pic x(20) value 'CONTENT_LENGTH'.
+             03 filler    pic x(20) value 'CONTENT_TYPE'.
+             03 filler    pic x(20) value 'DOCUMENT_ROOT'.
+             03 filler    pic x(20) value 'GATEWAY_INTERFACE'.
+             03 filler    pic x(20) value 'HTTP_ACCEPT'.
+             03 filler    pic x(20) value 'HTTP_ACCEPT_CHARSET'.
+             03 filler    pic x(20) value 'HTTP_ACCEPT_ENCODING'.
+             03 filler    pic x(20) value 'HTTP_ACCEPT_LANGUAGE'.
+             03 filler    pic x(20) value 'HTTP_COOKIE'.
+             03 filler    pic x(20) value 'HTTP_CONNECTION'.
+             03 filler    pic x(20) value 'HTTP_HOST'.
+             03 filler    pic x(20) value 'HTTP_REFERER'.
+             03 filler    pic x(20) value 'HTTP_USER_AGENT'.
+             03 filler    pic x(20) value 'LIB_PATH'.
+             03 filler    pic x(20) value 'PATH'.
+             03 filler    pic x(20) value 'PATH_INFO'.
+             03 filler    pic x(20) value 'PATH_TRANSLATED'.
+             03 filler    pic x(20) value 'QUERY_STRING'.
+             03 filler    pic x(20) value 'REMOTE_ADDR'.
+             03 filler    pic x(20) value 'REMOTE_HOST'.
+             03 filler    pic x(20) value 'REMOTE_IDENT'.
+             03 filler    pic x(20) value 'REMOTE_PORT'.
+             03 filler    pic x(20) value 'REQUEST_METHOD'.
+             03 filler    pic x(20) value 'REQUEST_URI'.
+             03 filler    pic x(20) value 'SCRIPT_FILENAME'.
+             03 filler    pic x(20) value 'SCRIPT_NAME'.
+             03 filler    pic x(20) value 'SERVER_ADDR'.
+             03 filler    pic x(20) value 'SERVER_ADMIN'.
+             03 filler    pic x(20) value 'SERVER_NAME'.
+             03 filler    pic x(20) value 'SERVER_PORT'.
+             03 filler    pic x(20) value 'SERVER_PROTOCOL'.
+             03 filler    pic x(20) value 'SERVER_SIGNATURE'.
+             03 filler    pic x(20) value 'SERVER_SOFTWARE'.
+          02 filler redefines name-strings.
+             03 name-string   pic x(20) occurs name-count times.
+
+
+
+       linkage section.
+
+       01 the-query pic x(1600).  
+
+       procedure division using the-query.
+
+
+         perform varying name-index from 1 by 1
+             until name-index > name-count
+                 accept value-string from environment
+                     name-string(name-index)
+                 end-accept
+
+                 if (name-string(name-index) = "PATH_INFO")
+                    
+                    move value-string to the-query
+
+                 end-if   
+
+         end-perform.
+
+      
+       goback.
+
+       end program getquery.
+
+
+
+
+
+
+
+
+
+
+
+
+
+       identification division.
+       program-id. showvars.
+
+       data division.
+       working-storage section.
+
+       01 ctr      pic 99 usage comp-5.
+
+       linkage section.
+
+       01 the-values.
+
+          05 query-values           occurs 10 times.
+            10 query-value-name     pic x(90).
+            10 query-value          pic x(90).
+
+
+       procedure division using the-values.
+
+
+
+           display "<table cellpadding=10 border=1 cellspacing=4 bgcolor=lightgray>"
+
+           perform varying ctr from 1 by 1
+             until ctr > 10
+
+               display "<tr><td>" query-value-name(ctr) "</td><td>" query-value(ctr) "</td></tr>"
+
+           end-perform
+
+
+           display "</table>"
+      
+       goback.
+
+       end program showvars.
+
+
+
+
+
+       identification division.
+       program-id. checkquery.
+
+       data division.
+       working-storage section.
+
+
+
+       01 choppery.
+
+          05 chopped-path-pieces occurs 99 times.                        
+             10 chopped-path-piece pic x(80) value spaces. 
+          05 chopped-pattern-pieces occurs 99 times.
+             10 chopped-pattern-piece pic x(80) value spaces.                           
+                                                                    
+       01 counter       pic s9(04) comp. 
+       01 positio       pic s9(04).                             
+       01 tmp-pointer      pic s9(04) comp value +1. 
+       01 tmp-pointer2      pic s9(04) comp value +1. 
+
+
+       01 counter-of-values      pic s9(2).
+
+       01 query-analysis.
+
+          05 query-values           occurs 10 times.
+            10 query-value-name     pic x(90).
+            10 query-value          pic x(90).
+
+
+
+       linkage section.
+       01  the-query pic x(255).
+       01  the-pattern pic x(255).
+       01  result  pic x(1).
+
+       01 query-analysis-out.
+
+          05 query-values-out           occurs 10 times.
+            10 query-value-name-out     pic x(90).
+            10 query-value-out          pic x(90).
+
+
+
+       procedure division using the-query the-pattern result query-analysis-out.
+
+
+          move spaces to choppery.
+          move "y" to result.
+          move 0 to counter-of-values.
+
+
+
+           move 1 to tmp-pointer.
+           move 1 to tmp-pointer2.
+
+
+           perform varying counter from 2 by 1 until counter > 99   
+
+           subtract 1 from counter giving positio
+           
+                unstring the-query delimited by '/'          
+                    into chopped-path-piece(positio)                    
+                   with pointer tmp-pointer    
+
+                unstring the-pattern delimited by '/'          
+                    into chopped-pattern-piece(positio)                    
+                   with pointer tmp-pointer2   
+
+            end-perform.
+
+            move 0 to counter.
+
+            *> display "<h3>" the-query " vs " the-pattern "</h3>"
+
+
+            perform varying counter from 1 by 1 until counter > 99 or result = "n"
+
+                *> for filling only entered values
+                *> if (chopped-path-piece(counter) equal spaces and counter>1)
+
+                *>  display "break"
+                *>  exit perform
+
+               *> else
+
+               *> display counter "::" result " (" chopped-path-piece(counter) "/" chopped-pattern-piece(counter) ")<P>"
+
+                 if (chopped-pattern-piece(counter)(1:1) equal "%")
+
+                    add 1 to counter-of-values
+                    move chopped-pattern-piece(counter) to query-value-name(counter-of-values) 
+                    move chopped-path-piece(counter) to query-value(counter-of-values) 
+
+                  *>  display "got val " chopped-pattern-piece(counter) "<P>"
+
+                 end-if    
+              
+                if 
+                  (chopped-path-piece(counter) not equal chopped-pattern-piece(counter) 
+                    and 
+                    chopped-pattern-piece(counter)(1:1) not equal "%") 
+                move "n" to result
+               *> display "<P><b>fail at " counter "</b> (" chopped-path-piece(counter) " :: "  chopped-pattern-piece(counter) ")</p>"
+                
+                end-if
+
+               *> end-if
+
+
+            end-perform.
+
+                if (result="y") 
+                    move query-analysis to query-analysis-out
+                end-if
+
+                
+
+
+
+
+
+
+
+
+
+
+
+
+      
+       goback.
+
+       end program checkquery.
+
+
+
+
+
+
+
+
+
+*> ***********************************************
+
+
+
+       identification division.
+       program-id. template.
+
+       environment division.
+       input-output section.
+       file-control.
+
+           select readfile
+               assign to readfile-name
+               file status is readfile-status
+               organization is line sequential.
+
+       data division.
+       file section.
+       fd  readfile.
+       01  readline pic x(1024).
+
+       working-storage section.
+
+       01  readfile-name pic x(255).
+       01  readfile-status pic x(2).
+
+       01  templine pic x(1024).
+
+       01  the-var           pic x(100).
+       01  what-we-change    pic x(100).
+
+       01 counter    PIC 9(4).
+
+
+       linkage section.
+
+       01 the-vars.
+
+          03  COW-vars OCCURS 99 times.
+        
+            05 COW-varname       pic x(99).
+            05 COW-varvalue      pic x(99).
+
+       01 template-filename     pic x(255).                 
+
+
+       procedure division using the-vars template-filename.
+
+       move 
+          function concatenate("views/",function trim(template-filename))
+          to readfile-name.
+
+       start-readfile.
+
+           open input readfile
+
+           call 'checkfilestatus' using readfile-name readfile-status
+
+           read readfile
+
+           perform until readfile-status = '10'
+           
+           move function trim(readline) to templine
+               
+               PERFORM VARYING counter FROM 1 BY 1 UNTIL counter > 99
+
+                   move 
+                      function concatenate(
+                        '{{' function trim(COW-varname(counter)) '}}'
+                        )
+                      to 
+                      what-we-change
+
+                   move
+                      function SUBSTITUTE(
+                        templine, 
+                        function trim(what-we-change), 
+                        function trim(COW-varvalue(counter)))
+                       to templine 
+
+               END-PERFORM
+
+               display function trim(templine)
+
+
+               read readfile
+           end-perform
+
+           close readfile.
+           
+
+
+       identification division.
+       program-id. checkfilestatus.
+
+       data division.
+       working-storage section.
+       01  status-message pic x(72).
+       01  display-message pic x(72) value spaces.
+
+       linkage section.
+       01  file-name pic x(64).
+       01  file-status pic x(2).
+
+       procedure division using file-name file-status.
+       start-checkfilestatus.
+           if file-status = '00'
+               goback
+           end-if
+           evaluate file-status
+           when 00 move 'SUCCESS.' TO status-message   
+           when 02 move 'SUCCESS DUPLICATE.' TO status-message 
+           when 04 move 'SUCCESS INCOMPLETE.' TO status-message 
+           when 05 move 'SUCCESS OPTIONAL.' TO status-message 
+           when 07 move 'SUCCESS NO UNIT.' TO status-message 
+           when 10 move 'END OF FILE.' TO status-message 
+           when 14 move 'OUT OF KEY RANGE.' TO status-message 
+           when 21 move 'KEY INVALID.' TO status-message 
+           when 22 move 'KEY EXISTS.' TO status-message 
+           when 23 move 'KEY NOT EXISTS.' TO status-message 
+           when 30 move 'PERMANENT ERROR.' TO status-message 
+           when 31 move 'INCONSISTENT FILENAME.' TO status-message 
+           when 34 move 'BOUNDARY VIOLATION.' TO status-message 
+           when 35 move 'FILE NOT FOUND.' TO status-message 
+           when 37 move 'PERMISSION DENIED.' TO status-message 
+           when 38 move 'CLOSED WITH LOCK.' TO status-message 
+           when 39 move 'CONFLICT ATTRIBUTE.' TO status-message 
+           when 41 move 'ALREADY OPEN.' TO status-message 
+           when 42 move 'NOT OPEN.' TO status-message 
+           when 43 move 'READ NOT DONE.' TO status-message 
+           when 44 move 'RECORD OVERFLOW.' TO status-message 
+           when 46 move 'READ ERROR.' TO status-message 
+           when 47 move 'INPUT DENIED.' TO status-message 
+           when 48 move 'OUTPUT DENIED.' TO status-message 
+           when 49 move 'I/O DENIED.' TO status-message 
+           when 51 move 'RECORD LOCKED.' TO status-message 
+           when 52 move 'END-OF-PAGE.' TO status-message 
+           when 57 move 'I/O LINAGE.' TO status-message 
+           when 61 move 'FILE SHARING FAILURE.' TO status-message 
+           when 91 move 'FILE NOT AVAILABLE.' TO status-message    
+           end-evaluate
+           string 'ERROR ' delimited by size
+               file-name delimited by space
+               space delimited by size
+               status-message delimited by '.'
+               into display-message
+           display display-message
+           stop run
+           .
+       end program checkfilestatus.
+       end program template.
+
+
+
+
+
+
+
+
+
+
+       end program cow.
+
+
+ 
